@@ -1,0 +1,9 @@
+﻿
+CREATE PROCEDURE spTournaments_GetAll
+AS
+BEGIN
+	SET NOCOUNT ON;
+
+	SELECT *
+	FROM Tournaments
+END

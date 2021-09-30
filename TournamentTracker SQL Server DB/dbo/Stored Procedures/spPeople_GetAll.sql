@@ -1,0 +1,9 @@
+﻿
+CREATE PROCEDURE spPeople_GetAll
+AS
+BEGIN
+	SET NOCOUNT ON;
+
+	SELECT *
+	FROM People
+END

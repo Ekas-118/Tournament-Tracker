@@ -1,0 +1,376 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using TrackerLibrary.Models;
+
+namespace TrackerLibrary
+{
+    public static class TournamentLogic
+    {
+        public static void CreateRounds(TournamentModel model)
+        {
+            // Order our list of teams randomly
+            List<TeamModel> randomizedTeams = RandomizeTeamOrder(model.EnteredTeams);
+
+            // Check if it is big enough - if not, add in byes - 2*2*2*2 - 2^4
+            int rounds = FindNumberOfRounds(randomizedTeams.Count);
+            int byes = NumberOfByes(rounds, randomizedTeams.Count);
+
+            // Create our first round of matchups
+            model.Rounds.Add(CreateFirstRound(byes, randomizedTeams));
+
+            // Create every round after that - 8 matchups - 4 matchups - 2 matchups - 1 matchup
+            CreateOtherRounds(model, rounds);
+        }
+
+        public static void UpdateTournamentResults(TournamentModel model)
+        {
+            int startingRound = model.CheckCurrentRound();
+
+            List<MatchupModel> toScore = new List<MatchupModel>();
+
+            foreach (List<MatchupModel> round in model.Rounds)
+            {
+                foreach (MatchupModel rm in round)
+                {
+                    if (rm.Winner == null && (rm.Entries.Any(x => x.Score != 0) || rm.Entries.Count == 1))
+                    {
+                        toScore.Add(rm);
+                    }
+                }
+            }
+
+            MarkWinnerInMatchups(toScore, model.GreaterScoreWins);
+
+            AdvanceWinners(toScore, model);
+
+            toScore.ForEach(x => GlobalConfig.Connection.UpdateMatchup(x));
+
+            int endingRound = model.CheckCurrentRound();
+
+            if (endingRound > startingRound)
+            {
+                model.AlertUsersToNewRound();
+            }
+        }
+
+        public static void AlertUsersToNewRound(this TournamentModel model)
+        {
+            int currentRoundNumber = model.CheckCurrentRound();
+            List<MatchupModel> currentRound = model.Rounds.Single(x => x.First().MatchupRound == currentRoundNumber);
+
+            foreach (MatchupModel matchup in currentRound)
+            {
+                foreach (MatchupEntryModel me in matchup.Entries)
+                {
+                    foreach (PersonModel p in me.TeamCompeting.TeamMembers)
+                    {
+                        AlertPersonToNewRound(p, me.TeamCompeting.TeamName, matchup.Entries.SingleOrDefault(x => x.TeamCompeting != me.TeamCompeting));
+                    }
+                }
+            }
+        }
+
+        private static void AlertPersonToNewRound(PersonModel p, string teamName, MatchupEntryModel competitor)
+        {
+            if (p.EmailAddress.Length == 0)
+            {
+                return;
+            }
+
+            string to = "";
+            string subject = "";
+            StringBuilder body = new StringBuilder();
+
+            if (competitor != null)
+            {
+                subject = $"You have a new matchup with {competitor.TeamCompeting.TeamName}";
+
+                body.AppendLine("<h1>You have a new matchup</h1><br>");
+                body.AppendLine("<strong>Competitor: </strong><br>");
+                body.Append(competitor.TeamCompeting.TeamName);
+                body.AppendLine("<br>");
+                body.AppendLine("<br>");
+                body.AppendLine("Have a great time!<br>");
+                body.AppendLine("~Tournament Tracker");
+            }
+            else
+            {
+                subject = "You have a bye week this round";
+
+                body.AppendLine("Enjoy your round off!<br>");
+                body.AppendLine("~Tournament Tracker");
+            }
+
+            to = p.EmailAddress;
+
+            Task.Run(() => EmailLogic.SendEmail(to, subject, body.ToString()));
+        }
+
+        private static int CheckCurrentRound(this TournamentModel model)
+        {
+            int output = 1;
+
+            foreach (List<MatchupModel> round in model.Rounds)
+            {
+                if (round.All(x => x.Winner != null))
+                {
+                    output += 1;
+                }
+                else
+                {
+                    return output;
+                }
+            }
+
+            CompleteTournament(model);
+
+            return output - 1;
+        }
+
+        private static void CompleteTournament(TournamentModel model)
+        {
+            GlobalConfig.Connection.CompleteTournament(model);
+            TeamModel winners = model.Rounds.Last().Single().Winner;
+            TeamModel runnerUp = model.Rounds.Last().Single().Entries.Single(x => x.TeamCompeting.Id != winners.Id).TeamCompeting;
+
+            decimal winnerPrize = 0;
+            decimal runnerUpPrize = 0;
+
+            PrizeModel firstPlacePrize = new PrizeModel();
+            PrizeModel secondPlacePrize = new PrizeModel();
+
+            if (model.Prizes.Count > 0)
+            {
+                decimal totalIncome = model.EnteredTeams.Count * model.EntryFee;
+
+                firstPlacePrize = model.Prizes.SingleOrDefault(x => x.PlaceNumber == 1);
+                secondPlacePrize = model.Prizes.SingleOrDefault(x => x.PlaceNumber == 2);
+
+                if (firstPlacePrize != null)
+                {
+                    winnerPrize = firstPlacePrize.CalculatePrizePayout(totalIncome);
+                }
+
+                if (secondPlacePrize != null)
+                {
+                    runnerUpPrize = secondPlacePrize.CalculatePrizePayout(totalIncome);
+                }
+            }
+
+            // Send an email to all tournament players
+            string subject = "";
+            StringBuilder body = new StringBuilder();
+
+            subject = $"In {model.TournamentName}, {winners.TeamName} has won!";
+
+            body.AppendLine("<h1>WE HAVE A WINNER!</h1><br>");
+            body.AppendLine("Congratulations to our winner on a great tournament.<br>");
+            body.AppendLine("<br>");
+
+            if (winnerPrize > 0)
+            {
+                body.AppendLine($"#1 ({firstPlacePrize.PlaceName}) {winners.TeamName} will receive ${winnerPrize:00.00##}<br>");
+            }
+
+            if (runnerUpPrize > 0)
+            {
+                body.AppendLine($"#2 ({secondPlacePrize.PlaceName}) {runnerUp.TeamName} will receive ${runnerUpPrize:00.00##}<br>");
+            }
+
+            body.AppendLine("<br>");
+            body.AppendLine("Thanks for a great tournament everyone!<br>");
+            body.AppendLine("~Tournament Tracker");
+
+            List<string> bcc = new List<string>();
+
+            foreach (TeamModel t in model.EnteredTeams)
+            {
+                foreach (PersonModel p in t.TeamMembers)
+                {
+                    if (p.EmailAddress.Length > 0)
+                    {
+                        bcc.Add(p.EmailAddress);
+                    }
+                }
+            }
+
+            Task.Run(() => EmailLogic.SendEmail(new List<string>(), bcc, subject, body.ToString()));
+
+            model.CompleteTournament();
+        }
+
+        private static decimal CalculatePrizePayout(this PrizeModel prize, decimal totalIncome)
+        {
+            if (prize.PrizeAmount > 0)
+            {
+                return prize.PrizeAmount;
+            }
+
+            return Decimal.Multiply(totalIncome, Convert.ToDecimal(prize.PrizePercentage / 100));
+        }
+
+        private static void AdvanceWinners(List<MatchupModel> models, TournamentModel tournament)
+        {
+            List<MatchupModel> matchups = new List<MatchupModel>();
+            tournament.Rounds.ForEach(round => round.ForEach(matchup => matchups.Add(matchup)));
+
+            foreach (MatchupModel m in models)
+            {
+                foreach (MatchupModel matchup in matchups)
+                {
+                    foreach (MatchupEntryModel me in matchup.Entries)
+                    {
+                        if (me.ParentMatchup != null)
+                        {
+                            if (me.ParentMatchup.Id == m.Id)
+                            {
+                                me.TeamCompeting = m.Winner;
+                                GlobalConfig.Connection.UpdateMatchup(matchup);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        private static void MarkWinnerInMatchups(List<MatchupModel> models, bool greaterScoreWins)
+        {
+            foreach (MatchupModel m in models)
+            {
+                // Check for bye week entry
+                if (m.Entries.Count == 1)
+                {
+                    m.Winner = m.Entries[0].TeamCompeting;
+                    continue;
+                }
+
+                if (!greaterScoreWins)
+                {
+                    if (m.Entries[0].Score < m.Entries[1].Score)
+                    {
+                        m.Winner = m.Entries[0].TeamCompeting;
+                    }
+                    else if (m.Entries[1].Score < m.Entries[0].Score)
+                    {
+                        m.Winner = m.Entries[1].TeamCompeting;
+                    }
+                    else
+                    {
+                        throw new Exception("We do not allow ties in this application.");
+                    }
+                }
+                else
+                {
+                    if (m.Entries[0].Score > m.Entries[1].Score)
+                    {
+                        m.Winner = m.Entries[0].TeamCompeting;
+                    }
+                    else if (m.Entries[1].Score > m.Entries[0].Score)
+                    {
+                        m.Winner = m.Entries[1].TeamCompeting;
+                    }
+                    else
+                    {
+                        throw new Exception("We do not allow ties in this application.");
+                    }
+                }
+            }
+        }
+
+        private static void CreateOtherRounds(TournamentModel model, int rounds)
+        {
+            int round = 2;
+            List<MatchupModel> previousRound = model.Rounds.First();
+            List<MatchupModel> currRound = new List<MatchupModel>();
+            MatchupModel currMatchup = new MatchupModel();
+
+            while (round <= rounds)
+            {
+                foreach (MatchupModel match in previousRound)
+                {
+                    currMatchup.Entries.Add(new MatchupEntryModel { ParentMatchup = match });
+
+                    if (currMatchup.Entries.Count > 1)
+                    {
+                        currMatchup.MatchupRound = round;
+                        currRound.Add(currMatchup);
+                        currMatchup = new MatchupModel();
+                    }
+                }
+                model.Rounds.Add(currRound);
+                previousRound = currRound;
+                currRound = new List<MatchupModel>();
+                round++;
+            }
+        }
+
+        private static List<MatchupModel> CreateFirstRound(int byes, List<TeamModel> teams)
+        {
+            List<MatchupModel> output = new List<MatchupModel>();
+            MatchupModel curr = new MatchupModel();
+
+            foreach (TeamModel team in teams)
+            {
+                curr.Entries.Add(new MatchupEntryModel { TeamCompeting = team });
+
+                if (byes > 0 || curr.Entries.Count > 1)
+                {
+                    curr.MatchupRound = 1;
+                    output.Add(curr);
+                    curr = new MatchupModel();
+
+                    if (byes > 0)
+                    {
+                        byes--;
+                    }
+                }
+            }
+
+            return output;
+        }
+
+        private static int NumberOfByes(int rounds, int numberOfTeams)
+        {
+            int output = 0;
+            int totalTeams = 1;
+
+            for (int i = 1; i <= rounds; i++)
+            {
+                totalTeams *= 2;
+            }
+
+            output = totalTeams - numberOfTeams;
+
+            return output;
+        }
+
+        /// <summary>
+        /// Returns the number of rounds in the tournament based on the number of teams participating
+        /// </summary>
+        /// <param name="teamCount">How many teams are in the tournament</param>
+        private static int FindNumberOfRounds(int teamCount)
+        {
+            int output = 1;
+            int val = 2;
+
+            while (val < teamCount)
+            {
+                output++;
+                val *= 2;
+            }
+
+            return output;
+        }
+
+        /// <summary>
+        /// Randomly shuffles the list of teams
+        /// </summary>
+        private static List<TeamModel> RandomizeTeamOrder(List<TeamModel> teams)
+        {
+            return teams.OrderBy(x => Guid.NewGuid()).ToList();
+        }
+    }
+}

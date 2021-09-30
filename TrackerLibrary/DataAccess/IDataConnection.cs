@@ -1,0 +1,23 @@
+﻿using System.Collections.Generic;
+using TrackerLibrary.Models;
+
+namespace TrackerLibrary.DataAccess
+{
+    /// <summary>
+    /// Interface for classes that save tournament data
+    /// </summary>
+    public interface IDataConnection
+    {
+        void CreatePrize(PrizeModel model);
+        void CreatePerson(PersonModel model);
+        void CreateTeam(TeamModel model);
+        void CreateTournament(TournamentModel model);
+        void UpdateMatchup(MatchupModel model);
+        void CompleteTournament(TournamentModel model);
+        void DeleteTournament(TournamentModel model);
+        void DeletePrize(PrizeModel model);
+        List<TeamModel> GetTeam_All();
+        List<PersonModel> GetPerson_All();
+        List<TournamentModel> GetTournament_All();
+    }
+}
