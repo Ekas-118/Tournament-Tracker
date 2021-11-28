@@ -6,7 +6,7 @@ Created by following the [tutorial series by IAmTimCorey on YouTube](https://www
 ## Prerequisites:
 - SQL Server
 
-## Original Features
+## Original Features (from the tutorial series)
 - 5 forms:
   - Tournament Dashboard (Main form)
   - Create Tournament Form
